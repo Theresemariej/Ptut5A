@@ -1,0 +1,740 @@
+–Séance, conversion en timestamps
+from(bucket: "metadata")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r._measurement == "schedule")
+  |> filter(fn: (r) => r.session_id == "CHL01" or r.session_id == "CHL02")
+  |> filter(fn: (r) => r._field == "start" or r._field == "end")
+  |> map(fn: (r) => ({
+      r with
+      _value: time(v: "2025-10-22T" + r._value + ":00Z")
+  }))
+  |> yield(name: "converted")
+
+
+
+–Code de création de la variable person_id:
+
+activity_ids = from(bucket: "activity")
+  |> range(start: -90d)
+  |> keep(columns: ["person_id"])
+  |> distinct(column: "person_id")
+
+wearable_ids = from(bucket: "wearable")
+  |> range(start: -90d)
+  |> keep(columns: ["person_id"])
+  |> distinct(column: "person_id")
+
+prox_ids = from(bucket: "proximity")
+  |> range(start: -90d)
+  |> keep(columns: ["person_id"])
+  |> distinct(column: "person_id")
+
+union(tables: [activity_ids, wearable_ids, prox_ids])
+  |> group()
+  |> distinct(column: "person_id")
+  |> yield(name: "all_persons")
+
+–Variable Activity:
+from(bucket: "activity")
+  |> range(start: -90d)
+  |> filter(fn: (r) => r["_measurement"] == "activity")
+  |> keep(columns: ["label"])
+  |> distinct(column: "label")
+  |> group()
+  |> distinct(column: "label")
+
+
+
+–Variable séance: 
+
+from(bucket: "metadata")
+  |> range(start: -90d)
+  |> filter(fn: (r) => r["_measurement"] == "schedule")
+  |> keep(columns: ["session_id"])
+  |> distinct(column: "session_id")
+  |> group()
+  |> distinct(column: "session_id")
+–Code basique avec variable:
+
+varPerson = /${person_id:regex}/
+
+from(bucket: "activity")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r["_measurement"] == "activity")
+  |> filter(fn: (r) => r["person_id"] =~ varPerson)
+  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
+  |> yield(name: "mean")
+
+
+–Code final avec variable:
+
+// --- Variable dynamique pour filtrer une personne ---
+varPerson = /${person_id:regex}/
+
+
+// --- 1. Récupération du heart rate ---
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => exists r.person_id)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+
+
+// --- 2. Récupération des activités ---
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] == "Bed making" or r["label"] == "Room cleaning")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: {label: "activity"})
+
+
+// --- 3. Jointure entre heart_rate et activity ---
+join(
+  tables: {hr: hr, act: act},
+  on: ["_time", "person_id"]
+)
+  |> keep(columns: ["_time", "person_id", "bpm", "activity"])
+  |> yield(name: "bpm_by_activity")
+
+
+–Code légende:
+varPerson = /${person_id:regex}/
+
+
+from(bucket: "activity")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r["_measurement"] == "activity")
+  |> filter(fn: (r) => r["person_id"] =~ varPerson)
+  |> map(fn: (r) => ({
+        r with
+        _field: "Activité : " + string(v: r.label) + " de " + string(v: r.person_id)
+  }))
+  |> drop(columns: ["label", "person_id"])
+  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
+  |> yield(name: "mean")
+
+
+–Légende complète _value Therese:
+varPerson = /${person_id:regex}/
+
+
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => exists r.person_id)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+
+
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] == "Bed making" or r["label"] == "Room cleaning")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: {label: "activity"})
+
+
+join(
+  tables: {hr: hr, act: act},
+  on: ["_time", "person_id"]
+)
+  // placer bpm dans _value et construire _field pour la légende Grafana
+  |> map(fn: (r) => ({
+      r with
+      _value: r.bpm,
+      _field: "Activité : " + string(v: r.activity) + " — " + string(v: r.person_id)
+  }))
+  |> keep(columns: ["_time", "_value", "_field", "person_id"])
+  |> yield(name: "bpm_by_activity")
+
+
+
+
+
+–Méthode 2 avec rename pour la légende: BPM par activité {}
+
+// --- Variable dynamique pour filtrer une personne ---
+varPerson = /${person_id:regex}/
+
+
+
+
+// --- 1. Récupération du heart rate ---
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => exists r.person_id)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+
+
+
+
+// --- 2. Récupération des activités ---
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] == "Bed making" or r["label"] == "Room cleaning")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: {label: "activity"})
+
+
+
+
+// --- 3. Jointure ---
+join(
+  tables: {hr: hr, act: act},
+  on: ["_time", "person_id"]
+)
+  |> keep(columns: ["_time", "person_id", "bpm", "activity"])
+  |> rename(columns: {bpm: "BPM par activité"})
+  |> yield(name: "bpm_by_activity")
+
+
+
+–Code complet légende !!!
+// --- Variable dynamique pour filtrer une personne ---
+varPerson = /${person_id:regex}/
+
+
+
+
+
+
+
+
+// --- 1. Récupération du heart rate ---
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => exists r.person_id)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+
+
+
+
+
+
+
+
+// --- 2. Récupération des activités ---
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] == "Bed making" or r["label"] == "Room cleaning")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: {label: "activity"})
+
+
+
+
+
+
+
+
+// --- 3. Jointure ---
+join(
+  tables: {hr: hr, act: act},
+  on: ["_time", "person_id"]
+)
+  |> keep(columns: ["_time", "person_id", "bpm", "activity"])
+  |> rename(columns: {bpm: "Battement de coeur de"})
+  |> drop(columns: ["activity"])
+  |> yield(name: "bpm_by_activity")
+
+
+
+
+
+–Vraie légende complète avec personne et activité:
+
+// --- Variable dynamique pour filtrer une personne ---
+varPerson = /${person_id:regex}/
+
+
+// --- 1. Récupération du heart rate ---
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => exists r.person_id)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+
+
+
+
+// --- 2. Récupération des activités ---
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] == "Bed making" or r["label"] == "Room cleaning")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: {label: "activity"})
+
+
+
+
+// --- 3. Jointure ---
+join(
+  tables: {hr: hr, act: act},
+  on: ["_time", "person_id"]
+)
+  |> keep(columns: ["_time", "person_id", "bpm", "activity"])
+  |> rename(columns: {
+    bpm: "Battement de coeur pour l'activité",
+    activity:"",
+    person_id:"réalisé par"
+   
+  })
+  |> yield(name: "bpm_by_activity")
+
+
+
+
+–Code avec variable person et variable activity:
+
+// --- Variable dynamique pour filtrer une personne ---
+varPerson = /${person_id:regex}/
+varActivity = /${activity:regex}/
+
+
+// --- 1. Récupération du heart rate ---
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => exists r.person_id)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+
+
+
+
+// --- 2. Récupération des activités ---
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] =~ varActivity)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: {label: "activity"})
+
+
+
+
+// --- 3. Jointure ---
+join(
+  tables: {hr: hr, act: act},
+  on: ["_time", "person_id"]
+)
+  |> keep(columns: ["_time", "person_id", "bpm", "activity"])
+  |> rename(columns: {
+    bpm: "Battement de coeur pour l'activité",
+    activity:"",
+    person_id:"réalisé par"
+   
+  })
+  |> yield(name: "bpm_by_activity")
+
+
+
+–Session, version 1: 
+// =======================================================
+// Variables dynamiques
+// =======================================================
+varPerson   = /${person_id:regex}/
+varActivity = /${activity:regex}/
+
+
+
+
+// =======================================================
+// 1. Reconstitution des sessions (start / end)
+// =======================================================
+sessions =
+  from(bucket: "metadata")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "session")
+    |> filter(fn: (r) => r["event"] == "start" or r["event"] == "end")
+    |> pivot(
+        rowKey: ["session_id"],
+        columnKey: ["event"],
+        valueColumn: "_time"
+    )
+    |> keep(columns: ["session_id", "start", "end"])
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+// =======================================================
+// 2. Récupération des activités
+// =======================================================
+activities =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] =~ varActivity)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: { label: "activity" })
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+// =======================================================
+// 3. Récupération du heart rate
+// =======================================================
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+// =======================================================
+// 4. Jointure sessions ↔ activités
+// =======================================================
+activities_in_sessions =
+  join(
+    tables: {s: sessions, a: activities},
+    on: ["join_key"]
+  )
+    |> filter(fn: (r) =>
+        r._time >= r.start and r._time <= r.end
+    )
+
+
+// =======================================================
+// 5. Jointure avec heart rate
+// =======================================================
+activities_with_hr =
+  join(
+    tables: {a: activities_in_sessions, hr: hr},
+    on: ["_time", "person_id"]
+  )
+    |> aggregateWindow(
+        every: v.windowPeriod,
+        fn: mean,
+        column: "bpm",
+        createEmpty: false
+    )
+    |> keep(columns: ["_time", "session_id", "activity", "person_id", "bpm"])
+    |> rename(columns: {
+        session_id: "Session",
+        activity: "Activité",
+        person_id: "Réalisé par",
+        bpm: "BPM moyen"
+    })
+    |> sort(columns: ["Session", "_time"])
+    |> yield(name: "activities_with_bpm")
+
+
+
+
+–filtre par session version finale:
+
+// =======================================================
+// Variables dynamiques
+// =======================================================
+varPerson   = /${person_id:regex}/
+varActivity = /${activity:regex}/
+varSession = /${seance:regex}/
+
+
+
+
+// =======================================================
+// 1. Reconstitution des sessions (start / end)
+// =======================================================
+sessions =
+  from(bucket: "metadata")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "session")
+    |> filter(fn: (r) => r["session_id"] =~ varSession)
+    |> filter(fn: (r) => r["event"] == "start" or r["event"] == "end")
+    |> pivot(
+        rowKey: ["session_id"],
+        columnKey: ["event"],
+        valueColumn: "_time"
+    )
+    |> keep(columns: ["session_id", "start", "end"])
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+// =======================================================
+// 2. Récupération des activités
+// =======================================================
+activities =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] =~ varActivity)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: { label: "activity" })
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+// =======================================================
+// 3. Récupération du heart rate
+// =======================================================
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+// =======================================================
+// 4. Jointure sessions ↔ activités
+// =======================================================
+activities_in_sessions =
+  join(
+    tables: {s: sessions, a: activities},
+    on: ["join_key"]
+  )
+    |> filter(fn: (r) =>
+        r._time >= r.start and r._time <= r.end
+    )
+
+
+// =======================================================
+// 5. Jointure avec heart rate
+// =======================================================
+activities_with_hr =
+  join(
+    tables: {a: activities_in_sessions, hr: hr},
+    on: ["_time", "person_id"]
+  )
+    |> aggregateWindow(
+        every: v.windowPeriod,
+        fn: mean,
+        column: "bpm",
+        createEmpty: false
+    )
+    |> keep(columns: ["_time", "session_id", "activity", "person_id", "bpm"])
+    |> rename(columns: {
+        session_id: "Session",
+        activity: "Activité",
+        person_id: "Réalisé par",
+        bpm: "BPM moyen"
+    })
+    |> sort(columns: ["Session", "_time"])
+    |> yield(name: "activities_with_bpm")
+
+
+–Proxymité room:
+from(bucket: "proximity")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r["_measurement"] == "proximity")
+  |> filter(fn: (r) => r["_field"] == "RSSI")
+  |> filter(fn: (r) => r["person_id"] == "Cherifa")
+  |> group(columns: ["room_id"])
+  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
+  |> sort(columns: ["_value"], desc: true)
+  |> limit(n: 1)
+  |> yield(name: "closest_room")
+
+
+
+–proximité pour une personne et une activité
+// --- Variables dynamiques ---
+varPerson = /${person_id:regex}/
+varActivity = /${activity:regex}/
+
+// --- 1. Proximité (RSSI) ---
+prox =
+  from(bucket: "proximity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "proximity")
+    |> filter(fn: (r) => r["_field"] == "RSSI")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "room_id", "person_id"])
+    |> rename(columns: {_value: "RSSI"})
+
+// --- 2. Activités ---
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] =~ varActivity)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "person_id", "label"])
+    |> rename(columns: {label: "activity"})
+
+// --- 3. Jointure + calcul de la salle la plus proche ---
+join(
+  tables: {prox: prox, act: act},
+  on: ["person_id"]
+)
+  |> yield(name: "closest_room_by_activity")
+
+
+–code session:
+
+// =======================================================
+// Variables dynamiques
+// =======================================================
+varPerson   = /${person_id:regex}/
+varActivity = /${activity:regex}/
+varSession = /${seance:regex}/
+
+
+// =======================================================
+// 1. Reconstitution des sessions (start / end)
+// =======================================================
+sessions =
+  from(bucket: "metadata")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "session")
+    |> filter(fn: (r) => r["session_id"] =~ varSession)
+    |> filter(fn: (r) => r["event"] == "start" or r["event"] == "end")
+    |> pivot(
+        rowKey: ["session_id"],
+        columnKey: ["event"],
+        valueColumn: "_time"
+    )
+    |> keep(columns: ["session_id", "start", "end"])
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+// =======================================================
+// 2. Récupération des activités
+// =======================================================
+activities =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] =~ varActivity)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: { label: "activity" })
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+
+
+
+
+// =======================================================
+// 3. Récupération du heart rate
+// =======================================================
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "fatigue_level")
+    |> filter(fn: (r) => r["_field"] == "fatigue_level")
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "fatigue_level"})
+    |> map(fn: (r) => ({ r with join_key: "1" }))
+
+
+
+
+
+
+
+
+// =======================================================
+// 4. Jointure sessions ↔ activités
+// =======================================================
+activities_in_sessions =
+  join(
+    tables: {s: sessions, a: activities},
+    on: ["join_key"]
+  )
+    |> filter(fn: (r) =>
+        r._time >= r.start and r._time <= r.end
+    )
+
+
+
+
+// =======================================================
+// 5. Jointure avec heart rate
+// =======================================================
+activities_with_hr =
+  join(
+    tables: {a: activities_in_sessions, hr: hr},
+    on: ["_time", "person_id"]
+  )
+    |> aggregateWindow(
+        every: v.windowPeriod,
+        fn: mean,
+        column: "fatigue_level",
+        createEmpty: false
+    )
+    |> keep(columns: ["_time", "session_id", "activity", "person_id", "fatigue_level"])
+    |> rename(columns: {
+        session_id: "Session",
+        activity: "Activité",
+        person_id: "Réalisé par",
+        fatigue_level: "niveau de fatigue"
+    })
+    |> sort(columns: ["Session", "_time"])
+    |> yield(name: "activities_with_fatigue_level")
+
+
+
