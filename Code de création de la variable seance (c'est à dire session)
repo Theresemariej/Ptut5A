@@ -1,0 +1,7 @@
+from(bucket: "metadata")
+  |> range(start: -90d)
+  |> filter(fn: (r) => r["_measurement"] == "schedule")
+  |> keep(columns: ["session_id"])
+  |> distinct(column: "session_id")
+  |> group()
+  |> distinct(column: "session_id")
