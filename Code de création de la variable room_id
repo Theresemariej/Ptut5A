@@ -1,0 +1,8 @@
+import "influxdata/influxdb/schema"
+
+schema.tagValues(
+  bucket: "environment",
+  tag: "room_id",
+  predicate: (r) => true,
+  start: -90d
+)
