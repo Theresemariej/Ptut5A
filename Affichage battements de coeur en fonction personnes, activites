@@ -1,0 +1,46 @@
+// --- Variable dynamique pour filtrer une personne ---
+varPerson = /${person_id:regex}/
+varActivity = /${activity:regex}/
+
+
+// --- 1. Récupération du heart rate ---
+hr =
+  from(bucket: "wearable")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "heart_rate")
+    |> filter(fn: (r) => r["_field"] == "bpm")
+    |> filter(fn: (r) => exists r.person_id)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "_value", "person_id"])
+    |> rename(columns: {_value: "bpm"})
+
+
+
+
+// --- 2. Récupération des activités ---
+act =
+  from(bucket: "activity")
+    |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+    |> filter(fn: (r) => r["_measurement"] == "activity")
+    |> filter(fn: (r) => r["_field"] == "dummy")
+    |> filter(fn: (r) => r["label"] =~ varActivity)
+    |> filter(fn: (r) => r["person_id"] =~ varPerson)
+    |> keep(columns: ["_time", "label", "person_id"])
+    |> rename(columns: {label: "activity"})
+
+
+
+
+// --- 3. Jointure ---
+join(
+  tables: {hr: hr, act: act},
+  on: ["_time", "person_id"]
+)
+  |> keep(columns: ["_time", "person_id", "bpm", "activity"])
+  |> rename(columns: {
+    bpm: "Battement de coeur pour l'activité",
+    activity:"",
+    person_id:"réalisé par"
+   
+  })
+  |> yield(name: "bpm_by_activity")
