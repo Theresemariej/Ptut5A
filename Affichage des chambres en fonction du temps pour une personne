@@ -1,0 +1,14 @@
+varPerson = /${person_id:regex}/
+
+from(bucket: "proximity")
+  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+  |> filter(fn: (r) => r["_measurement"] == "proximity")
+  |> filter(fn: (r) => r["_field"] == "RSSI")
+  |> filter(fn: (r) => r["person_id"] =~ varPerson)
+  |> group(columns: ["room_id"])
+  |> aggregateWindow(every: v.windowPeriod, fn: mean, createEmpty: false)
+  |> sort(columns: ["_value"], desc: true)
+  |> limit(n: 1)
+  |> yield(name: "closest_room")
+
+
