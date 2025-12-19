@@ -1,0 +1,19 @@
+activity_ids = from(bucket: "activity")
+  |> range(start: -90d)
+  |> keep(columns: ["person_id"])
+  |> distinct(column: "person_id")
+
+wearable_ids = from(bucket: "wearable")
+  |> range(start: -90d)
+  |> keep(columns: ["person_id"])
+  |> distinct(column: "person_id")
+
+prox_ids = from(bucket: "proximity")
+  |> range(start: -90d)
+  |> keep(columns: ["person_id"])
+  |> distinct(column: "person_id")
+
+union(tables: [activity_ids, wearable_ids, prox_ids])
+  |> group()
+  |> distinct(column: "person_id")
+  |> yield(name: "all_persons")
